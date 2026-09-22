@@ -154,43 +154,76 @@ jobs:
             sleep 1
           done
 
-          if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-            echo "SSH server failed to start." >&2
-            exit 1
-          fi
+name: Ubuntu VPS
 
-          public_ip="$(curl --fail --silent --show-error --max-time 15 -4 https://api.ipify.org)"
-          {
-            echo "SSH_USER=$USER"
-            echo "SSH_PORT=$port"
-            echo "SSH_HOST=$public_ip"
-            echo "SSH_KEY=$key_file"
-          } >> "$GITHUB_ENV"
+on:
+  workflow_dispatch:
 
-          echo "::add-mask::$(cat "$key_file")"
-          echo "::add-mask::$(cat "$key_file.pub")"
-          echo "::add-mask::$public_ip"
-          echo "::add-mask::$port"
-          echo "::add-mask::$USER"
+permissions:
+  contents: read
 
-          echo "Temporary key-only SSH server is running for workflow actor: $ACTOR"
+jobs:
+  vps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: System information
+        run: |
+          echo "===== SYSTEM ====="
+          uname -a
           echo
-          echo "========================================"
-          echo "          SSH CONNECTION COMMAND"
-          echo "========================================"
-          echo "The private key is stored securely on the runner at:"
-          echo "$key_file"
+          echo "===== CPU ====="
+          nproc
           echo
-          echo "Run this command from a secure environment containing that private key:"
-          echo "ssh -i /path/to/id_ed25519 -p $port $USER@$public_ip"
+          echo "===== MEMORY ====="
+          free -h
           echo
-          echo "SSH host: $public_ip"
-          echo "SSH port: $port"
-          echo "SSH user: $USER"
-          echo "Private key is available only on the runner at: $key_file"
-          echo "Use the GitHub Actions runner's secure environment or artifact handling to transfer the private key without printing it."
-          echo "WARNING: This is an ephemeral GitHub-hosted runner. The runner, SSH server, files, and installed software will be destroyed when the job ends or is canceled."
-          echo "WARNING: Never commit, print, upload, or expose the private key or other credentials. Treat workflow logs, artifacts, caches, and forwarded secrets as sensitive."
+          echo "===== DISK ====="
+          df -h /
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 \
+            python3-pip \
+            git \
+            curl \
+            wget \
+            nano \
+            unzip \
+            zip \
+            neofetch
+
+      - name: Start SSH session
+        id: tmate
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+
+      - name: Show SSH command
+        run: |
+          echo
+          echo "=========================================="
+          echo "          SSH COMMAND"
+          echo "=========================================="
+          echo "${{ steps.tmate.outputs.ssh-command }}"
+          echo
+          echo "=========================================="
+          echo "          SSH ADDRESS"
+          echo "=========================================="
+          echo "${{ steps.tmate.outputs.ssh-address }}"
+          echo
+          echo "=========================================="
+
+      - name: Keep runner alive
+        run: |
+          echo "Runner is available through the SSH command above."
+          while true; do
+            sleep 300
+          done
+Never commit, print, upload, or expose the private key or other credentials. Treat workflow logs, artifacts, caches, and forwarded secrets as sensitive."
           echo "WARNING: GitHub Actions usage limits, repository policies, concurrency, billing, and maximum job duration can terminate this workflow before the configured timeout."
 
       - name: Keep runner alive for a configurable duration
