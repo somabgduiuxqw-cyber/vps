@@ -1,0 +1,42 @@
+name: Ubuntu VPS
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  vps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show system information
+        run: |
+          echo "Ubuntu VPS started"
+          echo "Run number: $GITHUB_RUN_NUMBER"
+          echo "Hostname: $(hostname)"
+          echo "User: $(whoami)"
+          uname -a
+          free -h
+          df -h
+
+      - name: Install basic packages
+        run: |
+          sudo apt update
+          sudo apt install -y python3 python3-pip git curl wget
+
+      - name: Run your program
+        run: |
+          echo "Your program can run here"
+          # python3 your_program.py
+
+      - name: Keep job running
+        run: |
+          echo "Runner will remain available until the job timeout."
+          while true; do
+            echo "VPS run $GITHUB_RUN_NUMBER is running..."
+            sleep 300
+          done
