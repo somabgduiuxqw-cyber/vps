@@ -1,0 +1,231 @@
+name: Ubuntu VPS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ubuntu-vps-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: System information
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "========================================"
+          echo "        UBUNTU RUNNER INFORMATION"
+          echo "========================================"
+          echo "User:     $(whoami)"
+          echo "Hostname: $(hostname)"
+          echo "OS:"
+          . /etc/os-release
+          echo "$PRETTY_NAME"
+          echo
+          echo "Kernel:   $(uname -r)"
+          echo "Arch:     $(uname -m)"
+          echo "CPU:"
+          nproc
+          echo
+          echo "RAM:"
+          free -h
+          echo
+          echo "Disk:"
+          df -h /
+          echo
+          echo "Outbound IP:"
+          curl --fail --silent --show-error --max-time 15 -4 https://api.ipify.org || true
+          echo
+
+      - name: Install required packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            sudo \
+            openssh-server \
+            qemu-system-x86 \
+            qemu-utils \
+            cloud-image-utils \
+            wget \
+            curl \
+            lsof \
+            python3 \
+            python3-pip \
+            git \
+            nano \
+            unzip \
+            zip
+
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Verify installed tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          command -v sudo
+          command -v sshd
+          command -v qemu-system-x86_64
+          command -v qemu-img
+          command -v cloud-localds
+          command -v wget
+          command -v curl
+          command -v lsof
+
+          sshd -V 2>&1 || true
+          qemu-system-x86_64 --version
+          qemu-img --version
+          cloud-localds --version || true
+
+      - name: Create temporary SSH server
+        id: ssh
+        shell: bash
+        env:
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          ssh_dir="$RUNNER_TEMP/ssh"
+          mkdir -p "$ssh_dir"
+
+          key_file="$ssh_dir/id_ed25519"
+          authorized_keys="$ssh_dir/authorized_keys"
+          host_key="$ssh_dir/ssh_host_ed25519_key"
+          config_file="$ssh_dir/sshd_config"
+          port_file="$ssh_dir/port"
+
+          ssh-keygen -q -t ed25519 -N '' -C "github-actions-${GITHUB_RUN_ID}" -f "$key_file"
+          ssh-keygen -q -t ed25519 -N '' -f "$host_key"
+
+          printf '%s\n' "$(cat "$key_file.pub")" > "$authorized_keys"
+
+          port="$(python3 - <<'PY'
+          import socket
+          with socket.socket() as s:
+              s.bind(("127.0.0.1", 0))
+              print(s.getsockname()[1])
+          PY
+          )"
+          printf '%s\n' "$port" > "$port_file"
+
+          cat > "$config_file" <<EOF
+          Port $port
+          ListenAddress 0.0.0.0
+          HostKey $host_key
+          AuthorizedKeysFile $authorized_keys
+          PermitRootLogin no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          ChallengeResponseAuthentication no
+          PubkeyAuthentication yes
+          AuthenticationMethods publickey
+          AllowUsers $USER
+          AllowAgentForwarding no
+          AllowTcpForwarding no
+          GatewayPorts no
+          X11Forwarding no
+          PermitTunnel no
+          PermitUserEnvironment no
+          StrictModes yes
+          LogLevel QUIET
+          EOF
+
+          sudo sshd -t -f "$config_file"
+          sudo sshd -f "$config_file" -E "$ssh_dir/sshd.log"
+
+          for _ in {1..30}; do
+            if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "SSH server failed to start." >&2
+            exit 1
+          fi
+
+          public_ip="$(curl --fail --silent --show-error --max-time 15 -4 https://api.ipify.org)"
+          {
+            echo "SSH_USER=$USER"
+            echo "SSH_PORT=$port"
+            echo "SSH_HOST=$public_ip"
+            echo "SSH_KEY=$key_file"
+          } >> "$GITHUB_ENV"
+
+          echo "::add-mask::$(cat "$key_file")"
+          echo "::add-mask::$(cat "$key_file.pub")"
+          echo "::add-mask::$public_ip"
+          echo "::add-mask::$port"
+          echo "::add-mask::$USER"
+
+          echo "Temporary key-only SSH server is running for workflow actor: $ACTOR"
+          echo
+          echo "========================================"
+          echo "          SSH CONNECTION COMMAND"
+          echo "========================================"
+          echo "The private key is stored securely on the runner at:"
+          echo "$key_file"
+          echo
+          echo "Run this command from a secure environment containing that private key:"
+          echo "ssh -i /path/to/id_ed25519 -p $port $USER@$public_ip"
+          echo
+          echo "SSH host: $public_ip"
+          echo "SSH port: $port"
+          echo "SSH user: $USER"
+          echo "Private key is available only on the runner at: $key_file"
+          echo "Use the GitHub Actions runner's secure environment or artifact handling to transfer the private key without printing it."
+          echo "WARNING: This is an ephemeral GitHub-hosted runner. The runner, SSH server, files, and installed software will be destroyed when the job ends or is canceled."
+          echo "WARNING: Never commit, print, upload, or expose the private key or other credentials. Treat workflow logs, artifacts, caches, and forwarded secrets as sensitive."
+          echo "WARNING: GitHub Actions usage limits, repository policies, concurrency, billing, and maximum job duration can terminate this workflow before the configured timeout."
+
+      - name: Keep runner alive for a configurable duration
+        shell: bash
+        env:
+          KEEP_ALIVE_MINUTES: ${{ vars.KEEP_ALIVE_MINUTES || '60' }}
+        run: |
+          set -Eeuo pipefail
+
+          cleanup() {
+            sudo pkill -f "$RUNNER_TEMP/ssh/sshd_config" 2>/dev/null || true
+            rm -rf "$RUNNER_TEMP/ssh"
+            echo "Stopping runner."
+          }
+
+          trap cleanup EXIT INT TERM
+
+          if ! [[ "$KEEP_ALIVE_MINUTES" =~ ^[1-9][0-9]*$ ]]; then
+            echo "KEEP_ALIVE_MINUTES must be a positive integer." >&2
+            exit 1
+          fi
+
+          timeout_seconds=$((KEEP_ALIVE_MINUTES * 60))
+
+          echo "Ubuntu runner is ready."
+          echo "WARNING: The runner is ephemeral and will be discarded after this job; it is not a persistent VPS."
+          echo "WARNING: Do not store credentials on this runner beyond the job lifetime, and do not expose secrets through logs, artifacts, or SSH."
+          echo "WARNING: GitHub Actions quotas, billing limits, repository policies, cancellation, and the job timeout may end the session earlier."
+          echo "Keeping the runner alive for ${KEEP_ALIVE_MINUTES} minute(s)."
+
+          end_time=$((SECONDS + timeout_seconds))
+          while (( SECONDS < end_time )); do
+            remaining=$((end_time - SECONDS))
+            sleep_seconds=$(( remaining > 300 ? 300 : remaining ))
+            sleep "$sleep_seconds"
+          done
+
+          echo "Configured keep-alive timeout reached."
